@@ -36,6 +36,7 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
 import needle_reach.tasks  # noqa: F401
+import surgery_needle.tasks  # noqa: F401
 
 
 def main():
