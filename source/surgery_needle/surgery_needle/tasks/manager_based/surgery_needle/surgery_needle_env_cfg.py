@@ -37,7 +37,7 @@ from isaaclab.envs.mdp.actions.actions_cfg import JointVelocityActionCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
-
+from isaaclab.envs.mdp import time_out
 # Extension root (used to build asset paths)
 EXTENSION_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 
@@ -69,7 +69,18 @@ class SurgeryNeedleSceneCfg(InteractiveSceneCfg):
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
-                max_depenetration_velocity=5.0,
+            # 提高此值（或保持默认）以确保穿模时有足够的排斥力
+                max_depenetration_velocity=20.0, 
+            # 增加阻尼可以减少机械臂在碰撞或重置时的剧烈抖动
+                linear_damping=0.01,
+                angular_damping=0.01,
+            ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                # 开启机器人各 Link 之间的自碰撞，防止手穿过底座
+                enabled_self_collisions=True, 
+                # 增加解算器迭代次数，提高物理模拟的精度和硬度
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=1,
             ),
             scale=(1.0, 1.0, 1.0),
         ),
@@ -123,26 +134,64 @@ class SurgeryNeedleSceneCfg(InteractiveSceneCfg):
     )
 
     # Contact sensors
-    contact_arm_protect = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/panda/panda_link[4-7]",
+    contact_arm_phantom5 = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/panda/panda_link5",
         update_period=0.0,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/phantom"]
     )
 
-    contact_hand_protect = ContactSensorCfg(
+    contact_arm_phantom6 = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/panda/panda_link6",
+        update_period=0.0,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/phantom"]
+    )
+
+    contact_arm_phantom7 = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/panda/panda_link7",
+        update_period=0.0,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/phantom"]
+    )
+
+    contact_arm_table5 = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/panda/panda_link5",
+        update_period=0.0,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/table"]
+    )
+
+    contact_arm_table6 = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/panda/panda_link6",
+        update_period=0.0,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/table"]
+    )
+
+    contact_arm_table7 = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/panda/panda_link7",
+        update_period=0.0,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/table"]
+    )
+
+    contact_hand_phantom = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/panda/panda_hand",
         update_period=0.0,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/phantom"]
     )
 
-    contact_needle_protect = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/panda/needle",
+    contact_hand_table = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/panda/panda_hand",
         update_period=0.0,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/table"]
     )
 
-    contact_needle_tip = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/panda/needletip",
-        update_period=0.0,
-        filter_prim_paths_expr=["{ENV_REGEX_NS}/phantom"],
-    )
+    # contact_needle_protect = ContactSensorCfg(
+    #     prim_path="{ENV_REGEX_NS}/panda/needle",
+    #     update_period=0.0,
+    # )
+
+    # contact_needle_tip = ContactSensorCfg(
+    #     prim_path="{ENV_REGEX_NS}/panda/needletip",
+    #     update_period=0.0,
+    #     filter_prim_paths_expr=["{ENV_REGEX_NS}/phantom"],
+    # )
 
 
 @configclass
@@ -200,9 +249,12 @@ class RewardsCfg:
 class TerminationsCfg:
     """Termination terms: success and timeout."""
 
-    success = DoneTerm(func=mdp.is_success, params={"threshold": 0.01})
-    arm_contact = DoneTerm(func=mdp.arm_contact_termination)
-    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    success = DoneTerm(func=mdp.is_success, params={"threshold": 0.001})
+    arm_contact = DoneTerm(
+        func=mdp.arm_contact_termination,
+        params={"threshold": 2.0},
+    )
+    time_out = DoneTerm(func=time_out, time_out=True)
 
 
 @configclass
@@ -220,10 +272,16 @@ class EventCfg:
         },
     )
 
+    # Reset robot state (root pose + joints) each reset
+    # reset_robot = EventTerm(
+    #     func=mdp.reset_robot_state,
+    #     mode="reset",
+    # )
+
 
 @configclass
 class SurgeryNeedleEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SurgeryNeedleSceneCfg = SurgeryNeedleSceneCfg(num_envs=1024, env_spacing=1.0)
+    scene: SurgeryNeedleSceneCfg = SurgeryNeedleSceneCfg(num_envs=64, env_spacing=2.0)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     events: EventCfg = EventCfg()
@@ -233,10 +291,10 @@ class SurgeryNeedleEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self) -> None:
         # Basic sim settings
         self.decimation = 2
-        self.episode_length_s = 10
+        self.episode_length_s = 5.0
         self.viewer.eye = (1.0, -1.5, 1.2)
         self.sim.dt = 1.0 / 120.0
-        self.sim.render_interval = self.decimation
+        # self.sim.render_interval = self.decimation
 
 
 def create_env(cfg: SurgeryNeedleEnvCfg | None = None, render_mode: str | None = None):

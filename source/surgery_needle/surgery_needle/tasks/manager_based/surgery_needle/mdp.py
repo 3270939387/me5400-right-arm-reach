@@ -37,6 +37,58 @@ def joint_velocities(env, params=None):
     return asset.data.joint_vel
 
 
+# ---- Reset helpers ------------------------------------------------------
+
+def reset_robot_state(env, env_ids=None):
+    """Reset the robot root pose and joint states.
+
+    This uses the articulation's cached default root state and zeros joints/vels.
+    It is meant to be called from a reset EventTerm.
+    """
+
+    robot: Articulation = env.scene["robot"]
+    device = robot.data.joint_pos.device
+    num_envs = robot.data.joint_pos.shape[0]
+
+    if env_ids is None:
+        env_ids = torch.arange(num_envs, device=device)
+    else:
+        env_ids = torch.as_tensor(env_ids, device=device, dtype=torch.long)
+
+    # Default root state (pose + velocity) if available, else identity + zeros
+    if hasattr(robot.data, "default_root_state"):
+        root_state = robot.data.default_root_state
+        if root_state.shape[0] == 1 and num_envs > 1:
+            root_state = root_state.expand(num_envs, *root_state.shape[1:]).clone()
+            if hasattr(env, "scene") and hasattr(env.scene, "env_origins"):
+                root_state[:, :3] += env.scene.env_origins.to(device)
+        root_state = root_state.to(device)
+    else:
+        root_state = torch.zeros((num_envs, 13), device=device)
+        root_state[:, 3] = 1.0
+
+    robot.write_root_state_to_sim(root_state[env_ids], env_ids=env_ids)
+
+    # Joint states
+    if hasattr(robot.data, "default_joint_pos"):
+        jpos = robot.data.default_joint_pos
+        if jpos.shape[0] == 1 and num_envs > 1:
+            jpos = jpos.expand(num_envs, *jpos.shape[1:])
+        jpos = jpos.to(device)
+    else:
+        jpos = torch.zeros_like(robot.data.joint_pos)
+
+    if hasattr(robot.data, "default_joint_vel"):
+        jvel = robot.data.default_joint_vel
+        if jvel.shape[0] == 1 and num_envs > 1:
+            jvel = jvel.expand(num_envs, *jvel.shape[1:])
+        jvel = jvel.to(device)
+    else:
+        jvel = torch.zeros_like(robot.data.joint_vel)
+
+    robot.write_joint_state_to_sim(jpos[env_ids], jvel[env_ids], env_ids=env_ids)
+
+    return True
 # ---- Target sampling helpers ------------------------------------------
 
 def reset_target_position(
@@ -113,17 +165,27 @@ def reset_target_position(
 
 def get_target_position(env, device):
     """Return the current target position tensor on the given device."""
+    total_envs = env.num_envs if hasattr(env, "num_envs") else env.scene.num_envs
+
+    # If a target has already been sampled, return it (after moving to device).
     if hasattr(env, "_target_pos"):
         t = env._target_pos
         if t.device != device:
             t = t.to(device)
         return t
 
-    # fallback to the center of the rectangle (original static target)
-    center = torch.tensor((0.02492, 0.05746, 1.0), device=device)
-    num_envs = env.num_envs if hasattr(env, "num_envs") else env.scene.num_envs
-    return center.expand(num_envs, 3)
+    # Fallback: initialize a default target above each env origin so observation
+    # shape inference during manager setup does not crash before the first reset.
+    if hasattr(env, "scene") and hasattr(env.scene, "env_origins"):
+        origins = env.scene.env_origins.to(device)
+    else:
+        origins = torch.zeros((total_envs, 3), device=device)
 
+    default_target = origins.clone()
+    default_target[:, 2] = 1.0  # place at z=1.0 by default
+
+    env._target_pos = default_target
+    return env._target_pos
 
 def needletip_error_vector(env, params=None):
     """target_pos - needletip_pos using articulation body pose for needletip.
@@ -201,7 +263,7 @@ def collision_penalty(env, params=None):
     is_collided = force_mag > 1.0
     return is_collided.float() * -10.0
 
-def arm_contact_termination(env, params=None, threshold: float = 0.1):
+def arm_contact_termination(env, params=None, threshold: float = 50.0):
     """Terminate if any protected links/hand/needle register contact (hard stop)."""
 
     device = getattr(env.sim, "device", torch.device("cpu")) if hasattr(env, "sim") else torch.device("cpu")
@@ -219,12 +281,13 @@ def arm_contact_termination(env, params=None, threshold: float = 0.1):
         return force_mag > threshold
 
     # Any of the protective sensors triggers termination
-    arm_hit = _over_threshold("contact_arm_protect")
-    hand_hit = _over_threshold("contact_hand_protect")
-    needle_hit = _over_threshold("contact_needle_protect")
+    arm_phantom = _over_threshold("contact_arm_phantom5") | _over_threshold("contact_arm_phantom6") | _over_threshold("contact_arm_phantom7")
+    arm_table = _over_threshold("contact_arm_table5") | _over_threshold("contact_arm_table6") | _over_threshold("contact_arm_table7")
+    hand_phantom = _over_threshold("contact_hand_phantom")
+    hand_table = _over_threshold("contact_hand_table")
+    # needle_hit = _over_threshold("contact_needle_protect")
 
-    return arm_hit | hand_hit | needle_hit
-
+    return arm_phantom | arm_table | hand_phantom | hand_table # | needle_hit
 
 def needle_impact_penalty(env, params=None):
     """Soft penalty based on needle tip contact forces (no termination)."""
@@ -246,18 +309,9 @@ def needle_impact_penalty(env, params=None):
 
 # ---- Termination helpers -------------------------------------------------
 
-def is_success(env, threshold: float = 0.01):
+def is_success(env, threshold: float = 0.002):
     err = needletip_error_vector(env)
     dist = torch.norm(err, dim=1)
     return dist < threshold
 
 
-def time_out(env, params=None):
-    # env.step_count or similar should be available; fallback uses False.
-    device = getattr(env.sim, "device", torch.device("cpu")) if hasattr(env, "sim") else torch.device("cpu")
-    max_steps = params.get("max_steps", None) if params else None
-    if max_steps is None:
-        return torch.zeros((env.num_envs,), dtype=torch.bool, device=device)
-    # Placeholder: assumes env.current_step is scalar per env
-    step = getattr(env, "current_step", 0)
-    return torch.tensor([step >= max_steps] * (env.num_envs if hasattr(env, "num_envs") else env.scene.num_envs), device=device)
