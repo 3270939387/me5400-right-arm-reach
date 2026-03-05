@@ -38,55 +38,40 @@ def joint_velocities(env, params=None):
 
 
 # ---- Reset helpers ------------------------------------------------------
-
 def reset_robot_state(env, env_ids=None):
-    """Reset the robot root pose and joint states.
-
-    This uses the articulation's cached default root state and zeros joints/vels.
-    It is meant to be called from a reset EventTerm.
-    """
-
+    """手动合成环境偏移，确保机器人回到各自的正确位置。"""
     robot: Articulation = env.scene["robot"]
     device = robot.data.joint_pos.device
-    num_envs = robot.data.joint_pos.shape[0]
-
+    
+    # 1. 确定需要重置的环境索引
     if env_ids is None:
+        num_envs = env.num_envs if hasattr(env, "num_envs") else robot.data.joint_pos.shape[0]
         env_ids = torch.arange(num_envs, device=device)
     else:
         env_ids = torch.as_tensor(env_ids, device=device, dtype=torch.long)
 
-    # Default root state (pose + velocity) if available, else identity + zeros
-    if hasattr(robot.data, "default_root_state"):
-        root_state = robot.data.default_root_state
-        if root_state.shape[0] == 1 and num_envs > 1:
-            root_state = root_state.expand(num_envs, *root_state.shape[1:]).clone()
-            if hasattr(env, "scene") and hasattr(env.scene, "env_origins"):
-                root_state[:, :3] += env.scene.env_origins.to(device)
-        root_state = root_state.to(device)
-    else:
-        root_state = torch.zeros((num_envs, 13), device=device)
-        root_state[:, 3] = 1.0
+    # 2. 获取基础默认状态 (13 维: pos, rot, lin_vel, ang_vel)
+    # 注意：如果默认值只有 1 行，我们需要 expand 它
+    root_state = robot.data.default_root_state.clone()
+    if root_state.shape[0] == 1:
+        num_envs = env.num_envs if hasattr(env, "num_envs") else robot.data.joint_pos.shape[0]
+        root_state = root_state.expand(num_envs, -1).clone()
 
+    # 3. 【关键点】叠加环境偏移 (Env Origins)
+    # 获取这 64 个小房间在世界坐标系里的中心点
+    origins = env.scene.env_origins.to(device)
+    
+    # 将机器人的初始相对位置 (pos) 加上房间的中心位置 (origins)
+    # root_state[:, 0:3] 是位置信息
+    root_state[:, :3] += origins
+
+    # 4. 写入物理引擎 (仅针对当前需要重置的 env_ids)
     robot.write_root_state_to_sim(root_state[env_ids], env_ids=env_ids)
 
-    # Joint states
-    if hasattr(robot.data, "default_joint_pos"):
-        jpos = robot.data.default_joint_pos
-        if jpos.shape[0] == 1 and num_envs > 1:
-            jpos = jpos.expand(num_envs, *jpos.shape[1:])
-        jpos = jpos.to(device)
-    else:
-        jpos = torch.zeros_like(robot.data.joint_pos)
-
-    if hasattr(robot.data, "default_joint_vel"):
-        jvel = robot.data.default_joint_vel
-        if jvel.shape[0] == 1 and num_envs > 1:
-            jvel = jvel.expand(num_envs, *jvel.shape[1:])
-        jvel = jvel.to(device)
-    else:
-        jvel = torch.zeros_like(robot.data.joint_vel)
-
-    robot.write_joint_state_to_sim(jpos[env_ids], jvel[env_ids], env_ids=env_ids)
+    # 5. 重置关节 (关节是相对坐标，通常不需要加 origins)
+    jpos = robot.data.default_joint_pos[env_ids].clone()
+    jvel = robot.data.default_joint_vel[env_ids].clone()
+    robot.write_joint_state_to_sim(jpos, jvel, env_ids=env_ids)
 
     return True
 # ---- Target sampling helpers ------------------------------------------
@@ -172,6 +157,21 @@ def get_target_position(env, device):
         t = env._target_pos
         if t.device != device:
             t = t.to(device)
+        # keep markers visible by re-visualizing current targets each call
+        if not hasattr(env, "_target_marker"):
+            marker_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/target_markers",
+                markers={
+                    "target": sim_utils.SphereCfg(
+                        radius=0.01,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.5, 0.5)),
+                    ),
+                },
+            )
+            env._target_marker = VisualizationMarkers(marker_cfg)
+        orientations = torch.tensor((1.0, 0.0, 0.0, 0.0), device=device).repeat(total_envs, 1)
+        marker_indices = torch.zeros((total_envs,), dtype=torch.long, device=device)
+        env._target_marker.visualize(t, orientations, marker_indices=marker_indices)
         return t
 
     # Fallback: initialize a default target above each env origin so observation
@@ -185,6 +185,20 @@ def get_target_position(env, device):
     default_target[:, 2] = 1.0  # place at z=1.0 by default
 
     env._target_pos = default_target
+    if not hasattr(env, "_target_marker"):
+        marker_cfg = VisualizationMarkersCfg(
+            prim_path="/Visuals/target_markers",
+            markers={
+                "target": sim_utils.SphereCfg(
+                    radius=0.01,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.5, 0.5)),
+                ),
+            },
+        )
+        env._target_marker = VisualizationMarkers(marker_cfg)
+    orientations = torch.tensor((1.0, 0.0, 0.0, 0.0), device=device).repeat(total_envs, 1)
+    marker_indices = torch.zeros((total_envs,), dtype=torch.long, device=device)
+    env._target_marker.visualize(env._target_pos, orientations, marker_indices=marker_indices)
     return env._target_pos
 
 def needletip_error_vector(env, params=None):
@@ -219,7 +233,7 @@ def needletip_error_vector(env, params=None):
 
 # ---- Reward terms --------------------------------------------------------
 
-def shaping_reward(env, k: float = 10.0):
+def shaping_reward(env, k: float = 5.0):
     """Dense shaping: exp(-k * distance)."""
     # compute L2 distance
     err = needletip_error_vector(env)
@@ -250,20 +264,13 @@ def action_l2_penalty(env, params=None):
     return l2
 
 
-def collision_penalty(env, params=None):
-    """Penalty based on contact forces from contact sensor (uses GPU tensors)."""
-    robot: Articulation = env.scene["robot"]
+def is_alive_penalty(env, params=None):
+    """Small negative reward each step to encourage faster completion."""
     device = getattr(env.sim, "device", torch.device("cpu")) if hasattr(env, "sim") else torch.device("cpu")
-    if not hasattr(robot.data, "net_forces_w"):
-        num_envs = robot.data.body_pos_w.shape[0]
-        return torch.zeros((num_envs,), device=device)
+    num_envs = env.num_envs if hasattr(env, "num_envs") else env.scene.num_envs
+    return torch.ones((num_envs,), dtype=torch.float32, device=device)
 
-    net_forces = robot.data.net_forces_w  # [num_envs, num_bodies, 3]
-    force_mag = torch.norm(net_forces, dim=(1, 2))
-    is_collided = force_mag > 1.0
-    return is_collided.float() * -10.0
-
-def arm_contact_termination(env, params=None, threshold: float = 50.0):
+def arm_contact_termination(env, params=None, threshold: float = 100.0):
     """Terminate if any protected links/hand/needle register contact (hard stop)."""
 
     device = getattr(env.sim, "device", torch.device("cpu")) if hasattr(env, "sim") else torch.device("cpu")
@@ -275,19 +282,27 @@ def arm_contact_termination(env, params=None, threshold: float = 50.0):
         except Exception:
             return torch.zeros((num_envs,), dtype=torch.bool, device=device)
 
-        if not hasattr(sensor, "data") or not hasattr(sensor.data, "net_forces_w"):
+        if not hasattr(sensor, "data") or sensor.data.force_matrix_w is None:
             return torch.zeros((num_envs,), dtype=torch.bool, device=device)
-        force_mag = torch.norm(sensor.data.net_forces_w, dim=(1, 2))
-        return force_mag > threshold
+        point_mag = torch.norm(sensor.data.force_matrix_w, dim=-1)
+        max_point_mag = torch.max(point_mag.view(num_envs, -1), dim=1)[0]
+        return max_point_mag > threshold
 
     # Any of the protective sensors triggers termination
     arm_phantom = _over_threshold("contact_arm_phantom5") | _over_threshold("contact_arm_phantom6") | _over_threshold("contact_arm_phantom7")
     arm_table = _over_threshold("contact_arm_table5") | _over_threshold("contact_arm_table6") | _over_threshold("contact_arm_table7")
     hand_phantom = _over_threshold("contact_hand_phantom")
     hand_table = _over_threshold("contact_hand_table")
-    # needle_hit = _over_threshold("contact_needle_protect")
+    needle_hit = _over_threshold("contact_needle_protect")
 
-    return arm_phantom | arm_table | hand_phantom | hand_table # | needle_hit
+    return arm_phantom | arm_table | hand_phantom | hand_table | needle_hit
+
+def collision_reset_reward(env, params=None):
+    """如果触发了碰撞终止逻辑，给出一个巨大的负奖励。"""
+    collided = arm_contact_termination(env)
+    
+    # 将 True 转换为 1.0，False 转换为 0.0
+    return collided.float()
 
 def needle_impact_penalty(env, params=None):
     """Soft penalty based on needle tip contact forces (no termination)."""
@@ -298,18 +313,19 @@ def needle_impact_penalty(env, params=None):
         num_envs = env.num_envs if hasattr(env, "num_envs") else env.scene.num_envs
         return torch.zeros((num_envs,), device=device)
 
-    if not hasattr(sensor, "data") or not hasattr(sensor.data, "net_forces_w"):
+    if not hasattr(sensor, "data") or not hasattr(sensor.data, "force_matrix_w"):
         num_envs = env.num_envs if hasattr(env, "num_envs") else env.scene.num_envs
         return torch.zeros((num_envs,), device=device)
 
-    net_force = torch.norm(sensor.data.net_forces_w, dim=(1, 2))
-    penalty = (net_force > 0.05).float() * -5.0 * net_force
+    point_mag = torch.norm(sensor.data.force_matrix_w, dim=-1)
+    max_point_mag = torch.max(point_mag.view(env.num_envs, -1), dim=1)[0]
+    penalty = (max_point_mag > 0.5).float() * 5.0 * max_point_mag
     return penalty
 
 
 # ---- Termination helpers -------------------------------------------------
 
-def is_success(env, threshold: float = 0.002):
+def is_success(env, threshold: float = 0.005):
     err = needletip_error_vector(env)
     dist = torch.norm(err, dim=1)
     return dist < threshold

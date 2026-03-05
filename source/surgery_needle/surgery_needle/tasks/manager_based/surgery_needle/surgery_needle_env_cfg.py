@@ -182,16 +182,17 @@ class SurgeryNeedleSceneCfg(InteractiveSceneCfg):
         filter_prim_paths_expr=["{ENV_REGEX_NS}/table"]
     )
 
-    # contact_needle_protect = ContactSensorCfg(
-    #     prim_path="{ENV_REGEX_NS}/panda/needle",
-    #     update_period=0.0,
-    # )
+    contact_needle_protect = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/panda/needle",
+        update_period=0.0,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/table"]
+    )
 
-    # contact_needle_tip = ContactSensorCfg(
-    #     prim_path="{ENV_REGEX_NS}/panda/needletip",
-    #     update_period=0.0,
-    #     filter_prim_paths_expr=["{ENV_REGEX_NS}/phantom"],
-    # )
+    contact_needle_tip = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/panda/needletip",
+        update_period=0.0,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/phantom"],
+    )
 
 
 @configclass
@@ -239,20 +240,24 @@ class ObservationsCfg:
 class RewardsCfg:
     """Reward terms: dense shaping, success bonus, action penalty, optional collision penalty."""
 
-    shaping = RewTerm(func=mdp.shaping_reward, weight=2.0, params={"k": 15.0})
-    success = RewTerm(func=mdp.success_reward, weight=1.0, params={"bonus": 100.0, "threshold": 0.01})
+    shaping = RewTerm(func=mdp.shaping_reward, weight=1.0, params={"k": 5.0})
+    success = RewTerm(func=mdp.success_reward, weight=1.0, params={"bonus":500.0, "threshold": 0.01})
+    collision_reset = RewTerm(
+        func=mdp.collision_reset_reward, 
+        weight=-200.0)
+    needle_contact_penalty = RewTerm(func=mdp.needle_impact_penalty, weight=-1.0)
     action_penalty = RewTerm(func=mdp.action_l2_penalty, weight=-0.01)
-    needle_contact_penalty = RewTerm(func=mdp.needle_impact_penalty, weight=1.0)
+    time_penalty = RewTerm(func=mdp.is_alive_penalty, weight=-0.1)
 
 
 @configclass
 class TerminationsCfg:
     """Termination terms: success and timeout."""
 
-    success = DoneTerm(func=mdp.is_success, params={"threshold": 0.001})
+    success = DoneTerm(func=mdp.is_success, params={"threshold": 0.005})
     arm_contact = DoneTerm(
         func=mdp.arm_contact_termination,
-        params={"threshold": 2.0},
+        params={"threshold": 100.0},
     )
     time_out = DoneTerm(func=time_out, time_out=True)
 
@@ -273,15 +278,15 @@ class EventCfg:
     )
 
     # Reset robot state (root pose + joints) each reset
-    # reset_robot = EventTerm(
-    #     func=mdp.reset_robot_state,
-    #     mode="reset",
-    # )
+    reset_robot = EventTerm(
+        func=mdp.reset_robot_state,
+        mode="reset",
+    )
 
 
 @configclass
 class SurgeryNeedleEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SurgeryNeedleSceneCfg = SurgeryNeedleSceneCfg(num_envs=64, env_spacing=2.0)
+    scene: SurgeryNeedleSceneCfg = SurgeryNeedleSceneCfg(num_envs=64, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     events: EventCfg = EventCfg()
