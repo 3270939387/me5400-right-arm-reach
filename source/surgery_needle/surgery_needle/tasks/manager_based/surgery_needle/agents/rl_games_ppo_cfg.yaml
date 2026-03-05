@@ -6,10 +6,10 @@ params:
     clip_actions: 1.0
 
   algo:
-    name: ppo
+    name: a2c_continuous
 
   model:
-    name: continuous_ppo
+    name: continuous_a2c_logstd
 
   network:
     name: actor_critic
@@ -22,11 +22,15 @@ params:
           name: default
         sigma_init:
           name: const_initializer
-          val: 0
-        fixed_sigma: True
+          val: -1.0
+        fixed_sigma: False
     mlp:
       units: [64, 64]
       activation: relu
+      initializer:
+        name: default
+      regularizer:
+        name: None
 
   load_checkpoint: False
   load_path: ''
@@ -42,16 +46,26 @@ params:
     normalize_input: True
     normalize_value: True
     num_actors: -1
+    reward_shaper:
+      scale_value: 1.0
+    normalize_advantage: True
     gamma: 0.99
     tau : 0.95
     learning_rate: 3e-4
-    max_epochs: 100
-    save_frequency: 25
+    lr_schedule: adaptive
+    kl_threshold: 0.008
+    score_to_win: 20000
+    max_epochs: 10000
+    save_best_after: 50
+    save_frequency: 100
     grad_norm: 0.5
-    entropy_coef: 0.0
+    entropy_coef: 0.01
+    truncate_grads: True
+    e_clip: 0.2
     horizon_length: 64
     minibatch_size: 8192
     mini_epochs: 4
     critic_coef: 1.0
     clip_value: True
     seq_length: 4
+    bounds_loss_coef: 0.0001
